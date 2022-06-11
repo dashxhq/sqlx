@@ -28,7 +28,7 @@ pub struct PoolOptions<DB: Database> {
     pub(crate) after_release:
         Option<Box<dyn Fn(&mut DB::Connection) -> bool + 'static + Send + Sync>>,
     pub(crate) max_connections: u32,
-    pub(crate) connect_timeout: Duration,
+    pub(crate) acquire_timeout: Duration,
     pub(crate) min_connections: u32,
     pub(crate) max_lifetime: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
@@ -42,15 +42,20 @@ impl<DB: Database> Default for PoolOptions<DB> {
 }
 
 impl<DB: Database> PoolOptions<DB> {
+    /// Returns a default "sane" configuration, suitable for testing or light-duty applications.
+    ///
+    /// See the source of this method for the current default values.
     pub fn new() -> Self {
         Self {
+            // User-specifiable routines
             after_connect: None,
-            test_before_acquire: true,
             before_acquire: None,
             after_release: None,
+            test_before_acquire: true,
+            // A production application will want to set a higher limit than this.
             max_connections: 10,
             min_connections: 0,
-            connect_timeout: Duration::from_secs(30),
+            acquire_timeout: Duration::from_secs(30),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             fair: true,
@@ -58,16 +63,20 @@ impl<DB: Database> PoolOptions<DB> {
     }
 
     /// Set the maximum number of connections that this pool should maintain.
+    ///
+    /// Be mindful of the connection limits for your database as well as other applications
+    /// which may want to connect to the same database (or even multiple instances of the same
+    /// application in high-availability deployments).
     pub fn max_connections(mut self, max: u32) -> Self {
         self.max_connections = max;
         self
     }
 
-    /// Set the amount of time to attempt connecting to the database.
+    /// Set the maximum amount of time to spend waiting for a connection in [`Pool::acquire()`].
     ///
     /// If this timeout elapses, [`Pool::acquire`] will return an error.
-    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.connect_timeout = timeout;
+    pub fn acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.acquire_timeout = timeout;
         self
     }
 
@@ -230,7 +239,7 @@ impl<DB: Database> PoolOptions<DB> {
 
 async fn init_min_connections<DB: Database>(pool: &Arc<SharedPool<DB>>) -> Result<(), Error> {
     for _ in 0..cmp::max(pool.options.min_connections, 1) {
-        let deadline = Instant::now() + pool.options.connect_timeout;
+        let deadline = Instant::now() + pool.options.acquire_timeout;
         let permit = pool.semaphore.acquire(1).await;
 
         // this guard will prevent us from exceeding `max_size`
@@ -249,7 +258,7 @@ impl<DB: Database> Debug for PoolOptions<DB> {
         f.debug_struct("PoolOptions")
             .field("max_connections", &self.max_connections)
             .field("min_connections", &self.min_connections)
-            .field("connect_timeout", &self.connect_timeout)
+            .field("connect_timeout", &self.acquire_timeout)
             .field("max_lifetime", &self.max_lifetime)
             .field("idle_timeout", &self.idle_timeout)
             .field("test_before_acquire", &self.test_before_acquire)

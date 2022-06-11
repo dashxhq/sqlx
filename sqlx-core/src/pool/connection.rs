@@ -118,6 +118,12 @@ impl<DB: Database> PoolConnection<DB> {
                 return;
             };
 
+            // Immediately close the connection.
+            if floating.guard.pool.is_closed() {
+                // We don't care what's returned here, all that matters is that we tried.
+                let _ = floating.close().await;
+            }
+
             // test the connection on-release to ensure it is still viable,
             // and flush anything time-sensitive like transaction rollbacks
             // if an Executor future/stream is dropped during an `.await` call, the connection

@@ -280,7 +280,19 @@ impl<DB: Database> Pool<DB> {
 
     /// Retrieves a connection from the pool.
     ///
-    /// Waits for at most the configured connection timeout before returning an error.
+    /// This method has an internal timeout configured by [`PoolOptions::acquire_timeout`],
+    /// which caps the total amount of time this method can spend waiting across multiple phases:
+    ///
+    /// * First, it may need to wait for a permit from the semaphore, which grants it the privilege
+    ///   of opening a connection or popping one from the idle queue.
+    /// * If an existing idle connection is acquired, by default it will be checked for liveness
+    ///   and integrity before being returned, which may require executing a command on the
+    ///   connection. This can be disabled via [`PoolOptions::test_on_acquire`].
+    /// * If a new connection needs to be opened,
+    ///
+    ///
+    /// ### Note: Cancellation Behavior
+    ///
     pub fn acquire(&self) -> impl Future<Output = Result<PoolConnection<DB>, Error>> + 'static {
         let shared = self.0.clone();
         async move { shared.acquire().await.map(|conn| conn.attach(&shared)) }
@@ -312,31 +324,29 @@ impl<DB: Database> Pool<DB> {
         }
     }
 
-    /// Shut down the connection pool, waiting for all connections to be gracefully closed.
+    /// Shut down the connection pool, immediately waking any task waiting for a connection.
     ///
-    /// Upon `.await`ing this call, any currently waiting or subsequent calls to [Pool::acquire] and
+    /// Upon calling this method, any currently waiting or subsequent calls to [Pool::acquire] and
     /// the like will immediately return [Error::PoolClosed] and no new connections will be opened.
+    /// Checked-out connections are unaffected, but will be gracefully closed on-drop
+    /// rather than being returned to the pool.
     ///
-    /// Any connections currently idle in the pool will be immediately closed, including sending
-    /// a graceful shutdown message to the database server, if applicable.
+    /// Returns a `Future` which can be `.await`ed to ensure all connections are
+    /// gracefully closed. It will first close any idle connections currently waiting in the pool,
+    /// then wait for all checked-out connections to be returned or closed.
     ///
-    /// Checked-out connections are unaffected, but will be closed in the same manner when they are
-    /// returned to the pool.
+    /// Waiting for connections to be gracefully closed is optional, but will allow the database
+    /// server to clean up the resources sooner rather than later. This is especially important
+    /// for tests that create a new pool every time, otherwise you may see errors about connection
+    /// limits being exhausted even when running tests in a single thread.
     ///
-    /// Does not resolve until all connections are returned to the pool and gracefully closed.
+    /// If the returned `Future` is not run to completion, any remaining connections will be dropped
+    /// when the last handle for the given pool instance is dropped, which could be a handle
+    /// moved into a task spawned internally.
     ///
-    /// ### Note: `async fn`
-    /// Because this is an `async fn`, the pool will *not* be marked as closed unless the
-    /// returned future is polled at least once.
-    ///
-    /// If you want to close the pool but don't want to wait for all connections to be gracefully
-    /// closed, you can do `pool.close().now_or_never()`, which polls the future exactly once
-    /// with a no-op waker.
-    // TODO: I don't want to change the signature right now in case it turns out to be a
-    // breaking change, but this probably should eagerly mark the pool as closed and then the
-    // returned future only needs to be awaited to gracefully close the connections.
-    pub async fn close(&self) {
-        self.0.close().await;
+    /// `.close()` may be safely called and `.await`ed on multiple handles concurrently.
+    pub fn close(&self) -> impl Future<Output = ()> + '_ {
+        self.0.close()
     }
 
     /// Returns `true` if [`.close()`][Pool::close] has been called on the pool, `false` otherwise.
